@@ -1,0 +1,71 @@
+name: Warm cache
+
+# One run keeps watch for ~5.5 hours (a check every 5 minutes), then starts the next run itself.
+# GitHub's own timer (below) is only a backup that restarts the chain if it ever breaks; it does
+# nothing while a watch run is already going. Switch off = Disable workflow (a running watch stops too).
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Warm right now even if the site looks warm"
+        type: boolean
+        default: false
+      from_run:
+        description: "(internal) run that started this one"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      WARM_CONFIG: ${{ secrets.WARM_CONFIG }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet requests brotli
+      - name: Is a watch run already going?
+        id: guard
+        run: |
+          busy=$(gh run list -R "$GITHUB_REPOSITORY" -w warm.yml -s in_progress --json databaseId \
+            --jq "[.[].databaseId | select(. != ${{ github.run_id }} and . != (\"${{ inputs.from_run }}\" | tonumber? // 0))] | length")
+          echo "busy=$busy" >> "$GITHUB_OUTPUT"
+          [ "$busy" -gt 0 ] && echo "Another watch run is already going; nothing to do." || true
+      - name: Warm now (manual, forced)
+        if: inputs.force
+        run: python warm.py --force
+      - name: Watch for ~5.5 hours
+        if: ${{ !inputs.force && steps.guard.outputs.busy == '0' }}
+        run: python warm.py --loop 330
+      - name: Start the next watch run
+        if: ${{ always() && !cancelled() && !inputs.force && steps.guard.outputs.busy == '0' }}
+        run: |
+          [ "$(gh api repos/$GITHUB_REPOSITORY/actions/workflows/warm.yml --jq .state)" = active ] || exit 0
+          gh workflow run warm.yml -R "$GITHUB_REPOSITORY" -f from_run=${{ github.run_id }}
+
+  # GitHub pauses a repo's workflows after 60 days with no commits. One tiny commit a week keeps it running.
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Weekly heartbeat commit
+        run: |
+          week=$(date -u +%G-W%V)
+          if [ "$(cat last-alive.txt 2>/dev/null)" != "$week" ]; then
+            echo "$week" > last-alive.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+            git add last-alive.txt
+            git commit -m "keepalive $week"
+            git push
+          fi

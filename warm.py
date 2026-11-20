@@ -247,6 +247,27 @@ def switched_off():
         return False
 
 
+def nudge():
+    """Start another workflow at set times of day (optional NUDGE secret, JSON:
+    {"target": "owner/repo/workflow.yml", "token": "...", "windows": [[utc_hour, from_minute, to_minute], ...]}).
+    Silent: nothing about the target is printed."""
+    raw = os.environ.get("NUDGE")
+    if not raw:
+        return
+    try:
+        cfg = json.loads(raw)
+        now = time.gmtime()
+        if not any(now.tm_hour == h and a <= now.tm_min < b for h, a, b in cfg["windows"]):
+            return
+        owner, repo, wf = cfg["target"].split("/", 2)
+        r = requests.post(f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{wf}/dispatches",
+                          headers={"Authorization": f"Bearer {cfg['token']}", "Accept": "application/vnd.github+json"},
+                          json={"ref": "main"}, timeout=30)
+        print("nudge", "ok" if r.status_code == 204 else f"failed {r.status_code}")
+    except Exception as e:
+        print("nudge failed", type(e).__name__)
+
+
 def loop(minutes):
     """Check every 5 minutes for `minutes`, then exit (the workflow starts the next run)."""
     end, failed = time.time() + minutes * 60, 0
@@ -256,6 +277,7 @@ def loop(minutes):
             return 0
         t = time.time()
         print(time.strftime("%H:%M UTC", time.gmtime()), "check")
+        nudge()
         if once(False):
             failed = 1
             time.sleep(15 * 60)
